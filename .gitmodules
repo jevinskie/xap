@@ -1,0 +1,3 @@
+[submodule "deps/cbit"]
+	path = deps/cbit
+	url = https://github.com/jevinskie/cbit

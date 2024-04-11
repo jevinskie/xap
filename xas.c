@@ -3,7 +3,10 @@
 #include "cbit/str.h"
 #include "cbit/misc.h"
 
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include <ctype.h>
 #include <sys/time.h>
@@ -117,7 +120,7 @@ static size_t str_hash(const str *s) {
 #define strp_eq(a, b) str_eq(*(a), *(b))
 
 DECL_STATIC_HTAB_KEY(strp, str *, strp_hash, strp_eq, strp_null, 0);
-struct empty {};
+struct empty { bool unused; };
 DECL_HTAB(sym, strp, struct empty);
 DECL_VEC(struct sym *, symp);
 
@@ -177,7 +180,7 @@ struct as {
     enum seg seg;
     bool have_err;
 
-    struct htab_sym global_symtab, local_symtab;
+    HTAB_STORAGE(sym) global_symtab, local_symtab;
     struct vec_symp syms_to_free;
 
     struct vec_uint16_t cur;
@@ -214,7 +217,7 @@ is_local_sym_name(const str *name) {
 
 static inline struct sym *
 find_sym(struct as *as, const str *name, bool local) {
-    struct htab_sym *ht = local ? &as->local_symtab : &as->global_symtab;
+    struct htab_sym *ht = local ? HTAB_HTAB(&as->local_symtab, sym) : HTAB_HTAB(&as->global_symtab, sym);
     struct htab_bucket_sym *bucket = htab_setbucket_sym(ht, (str **) &name);
     if (!bucket->key) {
         struct sym *sym = malloc(sizeof(*sym));
@@ -357,6 +360,7 @@ static bool read_int(struct as *as, int32_t *out) {
                 got_any = true;
             }
             unreachable();
+            CBIT_FALLTHROUGH; // unreachable should make GCC shut up about this
         }
 
         case '-':
@@ -745,9 +749,9 @@ static void parse_insn(struct as *as, str *tok) {
 
         #define UNSIGNED() emit_code(as, 0x0009)
 
-        case insn_lsl:  UNSIGNED(); /* fallthrough */
+        case insn_lsl:  UNSIGNED(); CBIT_FALLTHROUGH;
         case insn_asl:  base = 0xa0; goto one_op;
-        case insn_lsr:  UNSIGNED(); /* fallthrough */
+        case insn_lsr:  UNSIGNED(); CBIT_FALLTHROUGH;
         case insn_asr:  base = 0xa4; goto one_op;
 
         one_op:
@@ -907,7 +911,7 @@ static void parse_dot(struct as *as) {
             return;
         }
         int32_t k = addy.u.k;
-        if (k < 0 || k >= max_addr_in_seg(as->seg)) {
+        if (k < 0 || (uint32_t)k >= max_addr_in_seg(as->seg)) {
             err(as, ".ORG address out of range");
             return;
         }
@@ -937,7 +941,7 @@ static void free_symtab(struct as *as, struct htab_sym *ht) {
         }
         vec_append_symp(&as->syms_to_free, sym);
     }
-    htab_free_storage_sym(ht);
+    HTAB_STORAGE_FREE(ht, sym);
 }
 
 static void parse_neutral(struct as *as) {
@@ -960,9 +964,9 @@ static void parse_neutral(struct as *as) {
         advance(as);
         skip_white(as);
         bool local = is_local_sym_name(&tok);
-        if (!local && as->local_symtab.length > 0) {
-            free_symtab(as, &as->local_symtab);
-            HTAB_INIT(&as->local_symtab);
+        if (!local && HTAB_LENGTH(&as->local_symtab, sym) > 0) {
+            free_symtab(as, HTAB_HTAB(&as->local_symtab, sym));
+            HTAB_STORAGE_INIT(&as->local_symtab, sym);
         }
         struct sym *sym = find_sym(as, &tok, local);
         if (sym->seg != UNK_SEG) {
@@ -1007,7 +1011,7 @@ static void parse_all(struct as *as) {
 }
 
 static bool expr_eval(struct as *as, uint32_t addr, const struct expr *expr, int32_t *out) {
-    enum operator op = expr->op; 
+    enum operator op = expr->op;
     switch (op) {
         case OP_CONST:
             *out = expr->u.k;
@@ -1061,9 +1065,9 @@ static bool expr_eval(struct as *as, uint32_t addr, const struct expr *expr, int
 }
 
 static void layout(struct as *as) {
-    free_symtab(as, &as->global_symtab);
-    free_symtab(as, &as->local_symtab);
-    HTAB_INIT(&as->local_symtab);
+    free_symtab(as, HTAB_HTAB(&as->global_symtab, sym));
+    free_symtab(as, HTAB_HTAB(&as->local_symtab, sym));
+    HTAB_STORAGE_INIT(&as->local_symtab, sym);
     bool need_again;
     do {
         need_again = false;
@@ -1078,8 +1082,8 @@ static void layout(struct as *as) {
                         int32_t dest;
                         uint8_t *mks = &chunk->u.reloc.max_known_size;
                         if (expr_eval(as, addr, &chunk->u.reloc.target, &dest)) {
-                            uint8_t size = dest == (uint32_t) (int8_t) dest ? 1
-                                         : dest == (uint32_t) (int16_t) dest ? 2
+                            uint8_t size = dest == (int8_t) dest ? 1
+                                         : dest == (int16_t) dest ? 2
                                          : 3;
                             if (size > *mks) {
                                 need_again = true;
@@ -1188,8 +1192,8 @@ static void as_init(struct as *as, const char *read_cursor,
     as->lineno = 1;
     as->seg = UNK_SEG;
     as->have_err = false;
-    HTAB_INIT(&as->global_symtab);
-    HTAB_INIT(&as->local_symtab);
+    HTAB_STORAGE_INIT(&as->global_symtab, sym);
+    HTAB_STORAGE_INIT(&as->local_symtab, sym);
     VEC_INIT(&as->syms_to_free);
     VEC_INIT(&as->cur);
     for (int i = 0; i < NUM_SEGS; i++)
@@ -1197,8 +1201,8 @@ static void as_init(struct as *as, const char *read_cursor,
 }
 
 static void as_free(struct as *as) {
-    htab_free_storage_sym(&as->global_symtab);
-    htab_free_storage_sym(&as->local_symtab);
+    HTAB_STORAGE_FREE(&as->global_symtab, sym);
+    HTAB_STORAGE_FREE(&as->local_symtab, sym);
     VEC_FOREACH(&as->syms_to_free, i, struct sym **symp, symp)
         free(*symp);
     vec_free_storage_symp(&as->syms_to_free);
@@ -1215,6 +1219,7 @@ static void as_free(struct as *as) {
 }
 
 int main(int argc, char **argv) {
+    (void)argc;
     str text = STR_INITER;
     FILE *fp = stdin;
     const char *filename = "<stdin>";
